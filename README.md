@@ -6,6 +6,6 @@
 
 - docker build -t fastapi-pdf-classifier .
 
-- docker run -p 5000:5000 fastapi-pdf-classifier
+- docker run -d --gpus all -p 5000:5000 fastapi-pdf-classifier
 
 - open your browser and go to http://localhost:5000/docs

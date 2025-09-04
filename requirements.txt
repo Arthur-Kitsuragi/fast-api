@@ -3,3 +3,7 @@ PyPDF2
 fastapi
 uvicorn[standard]
 python-multipart
+lazy-loader
+pydantic-settings
+pydantic
+pytest

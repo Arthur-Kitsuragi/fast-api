@@ -1,8 +1,8 @@
 from typing import Annotated
+from typing import Tuple
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from sources.pdf_read import read_pdf
-from sources.text_preprocessing import tokenize_long_text
 import numpy as np
 import pickle
 from sources.model import MyModel
@@ -13,28 +13,25 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from typing import List
+from transformers import AutoTokenizer
+from config.config import Settings
+from pydantic import BaseModel
+
+class PredictionResponse(BaseModel):
+    filename: str
+    class_name: str
+
+settings = Settings()
 
 executor = ThreadPoolExecutor(max_workers=1)
+
 model_lock = threading.Lock()
 
 target_names = ['alt.atheism', 'comp.graphics', 'comp.os.ms-windows.misc', 'comp.sys.ibm.pc.hardware', 'comp.sys.mac.hardware', 'comp.windows.x', 'misc.forsale', 'rec.autos', 'rec.motorcycles', 'rec.sport.baseball', 'rec.sport.hockey', 'sci.crypt', 'sci.electronics', 'sci.med', 'sci.space', 'soc.religion.christian', 'talk.politics.guns', 'talk.politics.mideast', 'talk.politics.misc', 'talk.religion.misc']
 
-max_tokens = 10000
-output_sequence_length = 200 + 1
-lstm_units1 = 256
-lstm_units2 = 128
-dense_units = 256
-dropout = 0.5
-dropout1 = 0.5
-num_classes = 20
+tokenizer = AutoTokenizer.from_pretrained(settings.bert_model_name)
 
-try:
-    with open("model/vocab.pkl", "rb") as f:
-        vocabulary = pickle.load(f)
-except Exception as e:
-    raise HTTPException(status_code=500, detail=f"Failed to load vocabulary: {str(e)}")
-
-model = MyModel(max_tokens, output_sequence_length, lstm_units1, lstm_units2, dense_units, dropout, dropout1, num_classes)
+model = MyModel(settings.bert_model_name, settings.lstm_units, settings.dense_units, settings.num_classes, settings.nhead, settings.num_layers, settings.dropout)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -49,25 +46,26 @@ model.to(DEVICE)
 
 model.eval()
 
-def prepare_file(file: UploadFile) -> torch.Tensor:
+def prepare_file(file: UploadFile) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Read PDF, tokenize it and turn it into PyTorch Tensor
+    Read PDF, tokenize it and turn it into input_ids and attention_mask
 
     Args:
         file (UploadFile): Loaded file
 
     Returns:
-        torch.Tensor: Tensor with tokenized text
-
+        Tuple[torch.Tensor, torch.Tensor]:
+            - input_ids: Tensor of tokens (batch_size, seq_len)
+            - attention_mask: Tensors of masks (batch_size, seq_len)
     Raises:
         HTTPException: file is not PDF
     """
     if not file.filename.lower().endswith(".pdf"): raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     text = read_pdf(file.file)
-    text_blocks = tokenize_long_text(text, vocabulary, output_sequence_length)
-    text_blocks_array = np.array(text_blocks)
-    text_blocks_tensor = torch.tensor(text_blocks_array, dtype=torch.long).to(DEVICE)
-    return text_blocks_tensor
+    X_tensor = tokenizer(text, padding=True, truncation=True, return_tensors="pt")
+    input_ids = X_tensor['input_ids'].to(DEVICE)
+    attention_mask = X_tensor['attention_mask'].to(DEVICE)
+    return input_ids, attention_mask
 
 async def async_prepare_file(file: UploadFile) -> torch.Tensor:
     """
@@ -77,17 +75,20 @@ async def async_prepare_file(file: UploadFile) -> torch.Tensor:
         file (UploadFile): Loaded file
 
     Returns:
-        torch.Tensor: Tensor with tokenized text
+        Tuple[torch.Tensor, torch.Tensor]:
+            - input_ids: Tensor of tokens (batch_size, seq_len)
+            - attention_mask: Tensors of masks (batch_size, seq_len)
     """
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: prepare_file(file))
 
-def classify_pdf(tensor: torch.Tensor) -> str:
+def classify_pdf(input_ids, attention_mask) -> str:
     """
     Makes a class prediction from an input tensor using a model.
 
     Args:
-        tensor (torch.Tensor): Input Tensor
+        input_ids: Tensor of tokens (batch_size, seq_len)
+        attention_mask: Tensors of masks (batch_size, seq_len)
 
     Returns:
         str: Name of the predicted class
@@ -96,7 +97,7 @@ def classify_pdf(tensor: torch.Tensor) -> str:
         HTTPException: If an error occurred during inference.
     """
     try:
-        preds = model(tensor)
+        preds = model(input_ids=input_ids, attention_mask=attention_mask)
         final_pred = preds.mean(dim=0).detach().cpu().numpy()
         pred_class_index = np.argmax(final_pred)
         pred_class_name = target_names[pred_class_index]
@@ -104,18 +105,19 @@ def classify_pdf(tensor: torch.Tensor) -> str:
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Model inference failed: {str(error)}")
 
-def model_call(tensor: torch.Tensor) -> str:
+def model_call(input_ids, attention_mask) -> str:
     """
     Wraps a model call in a thread lock.
 
     Args:
-        tensor (torch.Tensor): Input Tensor
+        input_ids: Tensor of tokens (batch_size, seq_len)
+        attention_mask: Tensors of masks (batch_size, seq_len)
 
     Returns:
         str: Name of the predicted class
     """
     with model_lock:
-        return classify_pdf(tensor)
+        return classify_pdf(input_ids, attention_mask)
 
 async def async_classify(file: UploadFile) -> str:
     """
@@ -127,9 +129,9 @@ async def async_classify(file: UploadFile) -> str:
     Returns:
     str: The name of the predicted class
     """
-    tensor = await async_prepare_file(file)
+    input_ids, attention_mask = await async_prepare_file(file)
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, lambda: model_call(tensor))
+    return await loop.run_in_executor(executor, lambda: model_call(input_ids, attention_mask))
 
 app = FastAPI()
 
@@ -155,17 +157,22 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     )
 
 @app.post("/uploadfiles")
-async def create_upload_files(files: List[UploadFile]) -> JSONResponse:
+async def create_upload_files(files: List[UploadFile]) -> List[PredictionResponse]:
     """
     Endpoint for uploading one or more PDF files and classifying them.
 
     Args:
-    files (list[UploadFile]): List of uploaded files.
+        files (List[UploadFile]): List of uploaded PDF files.
 
     Returns:
-    JSONResponse: Dictionary of {filename: predicted_class}.
+        List[PredictionResponse]: List of objects with filename and predicted class.
     """
     tasks = [async_classify(file) for file in files]
     results = await asyncio.gather(*tasks)
-    return JSONResponse({file.filename: result for file, result in zip(files, results)}, status_code=200)
+
+    response_list = [
+        PredictionResponse(filename=file.filename, class_name=result)
+        for file, result in zip(files, results)
+    ]
+    return response_list
 

@@ -2,57 +2,84 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from transformers import AutoModel
+from typing import Optional
 
 class MyModel(nn.Module):
     """
-    Two-layer BiLSTM model for text classification.
+     Custom text classification model combining:
+       - a frozen BERT encoder,
+       - a bidirectional LSTM,
+       - a Transformer encoder,
+       - and fully connected layers for classification.
 
-    Args:
-    max_tokens (int): Dictionary size (number of unique tokens).
-    embedding_dim (int): Dimensionality of the embedding layer.
-    lstm_units1 (int): Number of hidden units in the first LSTM.
-    lstm_units2 (int): Number of hidden units in the second LSTM.
-    dense_units (int): Size of the dense layer before the output.
-    dropout (float): Dropout after the LSTM.
-    dropout1 (float): Dropout after the dense layer.
-    num_classes (int): Number of classes to classify.
-    """
-    def __init__(self, max_tokens, embedding_dim, lstm_units1, lstm_units2, dense_units, dropout, dropout1,
-                 num_classes):
+     Args:
+         bert_model_name (str): Name of the pretrained BERT model.
+         lstm_units (int): Number of hidden units in the LSTM layer.
+         dense_units (int): Number of hidden units in the dense (feedforward) layer.
+         num_classes (int): Number of output classes for classification.
+         nhead (int): Number of attention heads in the Transformer encoder.
+         num_layers (int): Number of Transformer encoder layers.
+         dropout (float): Dropout rate applied after the dense layer.
+
+     Forward inputs:
+         input_ids (torch.Tensor): Token IDs of shape (batch_size, seq_len).
+         attention_mask (Optional[torch.Tensor]): Attention mask of shape (batch_size, seq_len).
+
+     Forward outputs:
+         torch.Tensor: Logits of shape (batch_size, num_classes).
+     """
+    def __init__(self, bert_model_name="bert-base-uncased", lstm_units=128,
+                 dense_units=256, num_classes=20, nhead=4, num_layers=1, dropout=0.5):
         super(MyModel, self).__init__()
 
-        self.embedding = nn.Embedding(num_embeddings=max_tokens, embedding_dim=embedding_dim, padding_idx=0)
+        self.bert = AutoModel.from_pretrained(bert_model_name)
+        for param in self.bert.parameters():
+            param.requires_grad = False
 
-        self.lstm1 = nn.LSTM(input_size=embedding_dim, hidden_size=lstm_units1, batch_first=True, bidirectional=True)
-        self.lstm2 = nn.LSTM(input_size=2 * lstm_units1, hidden_size=lstm_units2, batch_first=True, bidirectional=True)
+        bert_hidden_size = self.bert.config.hidden_size
+
+        self.lstm = nn.LSTM(input_size=bert_hidden_size,
+                            hidden_size=lstm_units,
+                            batch_first=True,
+                            bidirectional=True)
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=2 * lstm_units,
+                                                   nhead=nhead,
+                                                   dim_feedforward=dense_units,
+                                                   dropout=dropout,
+                                                   batch_first=True)
+
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         self.dropout = nn.Dropout(dropout)
-        self.dropout1 = nn.Dropout(dropout1)
 
-        self.fc = nn.Linear(2 * lstm_units2, dense_units)
+        self.fc = nn.Linear(2 * lstm_units, dense_units)
         self.out = nn.Linear(dense_units, num_classes)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass of the model.
 
         Args:
-        Tensor: Input tensor with token indices (batch_size, seq_len).
+            input_ids (torch.Tensor): Input token IDs, shape (batch_size, seq_len).
+            attention_mask (Optional[torch.Tensor]): Attention mask, shape (batch_size, seq_len).
 
         Returns:
-        Tensor: Output logits of the model (batch_size, num_classes).
+            torch.Tensor: Logits of shape (batch_size, num_classes).
         """
-        x = x.long()
-        x = self.embedding(x)
+        with torch.no_grad():
+            bert_outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+            x = bert_outputs.last_hidden_state
 
-        x, _ = self.lstm1(x)
-        x, _ = self.lstm2(x)
+        x, _ = self.lstm(x)
+        x = self.transformer(x)
 
-        x = x[:, -1, :]
+        x = x.mean(dim=1)
 
-        x = self.dropout(x)
-        x = F.relu(self.fc(x))
-        x = self.dropout1(x)
+        x = self.dropout(F.relu(self.fc(x)))
         x = self.out(x)
 
         return x
