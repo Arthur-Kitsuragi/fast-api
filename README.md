@@ -4,12 +4,8 @@
 
 - cd fast-api
 
-- python -m venv venv
+- docker build -t fastapi-pdf-classifier .
 
-- source venv/Scripts/activate
+- docker run -p 5000:5000 fastapi-pdf-classifier
 
-- python -m pip install --upgrade pip
-
-- pip install -r requirements.txt
-
-- uvicorn main:app --reload
+- open your browser and go to http://localhost:5000/docs

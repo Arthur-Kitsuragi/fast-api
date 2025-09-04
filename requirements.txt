@@ -1,6 +1,5 @@
-tensorflow>=2.20
 numpy
 PyPDF2
 fastapi
-python-multipart
 uvicorn[standard]
+python-multipart
