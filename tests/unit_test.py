@@ -26,7 +26,7 @@ def test_read_pdf(monkeypatch):
     assert text.strip() == "dummy text"
 
 def test_prepare_file_pdf(monkeypatch):
-    monkeypatch.setattr("sources.pdf_read.read_pdf", lambda f: "dummy text for tokenizer")
+    monkeypatch.setattr("main.read_pdf", lambda f: "dummy text for tokenizer")
 
     from main import prepare_file
     dummy_pdf = UploadFile(filename="test.pdf", file=BytesIO(b"not a real pdf"))
