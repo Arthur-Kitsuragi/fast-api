@@ -1,7 +1,11 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
+    #.env
     bert_model_name: str = "bert-base-uncased"
+    model_path: str
+    device: str = "cpu"
+    #code
     lstm_units: int  = 128
     dense_units: int = 256
     num_classes: int = 20

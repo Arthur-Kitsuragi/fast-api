@@ -5,7 +5,7 @@ class PDFUser(HttpUser):
 
     @task
     def upload_pdf(self):
-        with open("test.pdf", "rb") as f:
+        with open("tests/resources/test.pdf", "rb") as f:
             files = {"files": ("test.pdf", f, "application/pdf")}
 
             response = self.client.post("/uploadfiles", files=files)
